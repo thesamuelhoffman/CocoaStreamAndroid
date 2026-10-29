@@ -23,6 +23,8 @@ jobs:
       - name: Install JavaScript test parser
         run: npm install --ignore-scripts --no-audit --no-fund
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Install Android SDK packages
         run: sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
       - name: Configure stable release signing when repository secrets are set
