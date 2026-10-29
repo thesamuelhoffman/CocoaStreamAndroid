@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {AddonClient} from '../app/src/main/assets/app/addons-client.js';
+const addon={key:'cinemeta',url:'https://catalog.example/manifest.json',manifest:{id:'cinemeta',catalogs:[{id:'top',type:'movie',extra:[{name:'search'}]},{id:'top',type:'series',extra:[{name:'search'}]}]}};
+const client=new AddonClient(()=>({addons:[addon]}),async()=>{});
+client.ensureDiscoveryManifests=async()=>[addon];
+client.ensureManifests=async()=>{throw new Error('Search must not wait for stream-only manifests');};
+globalThis.window={cocoa:{addons:{request:async p=>p.type==='series'?new Promise(()=>{}):{metas:[{id:'tt1234567',name:'Visible result',type:'movie'}]}}}};
+let publish;
+const first=new Promise(r=>publish=r);
+client.search('movie',results=>publish(results)).catch(()=>{});
+const result=await Promise.race([first,new Promise(r=>setTimeout(()=>r(null),100))]);
+assert.equal(result?.[0]?.name,'Visible result','A slow provider must not hold back ready search results');
+console.log('Search publishes ready results without waiting for stream manifests or slow catalogs PASS');

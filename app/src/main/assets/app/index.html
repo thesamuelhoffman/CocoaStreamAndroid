@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta http-equiv="Content-Security-Policy" content="frame-src 'none'; object-src 'none'; base-uri 'self'; default-src 'self' https: http: blob: data:; script-src 'self'; style-src 'self' 'unsafe-inline' https:; font-src https: data:; img-src 'self' https: http: data: blob: android-webview-video-poster:; media-src 'self' https: http: blob:; connect-src 'self' https: http: ws: wss:;" />
+  <title>CocoaStream</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./android.css" />
+</head>
+<body>
+  <div id="app"><div class="empty-state" role="status"><div><img src="./assets/cocoa-128.png" width="72" height="72" alt="CocoaStream" /><strong style="display:block;margin-top:16px">CocoaStream</strong><p id="startup-status">Starting your library…</p><button class="solid-btn" id="startup-retry" hidden>Try again</button></div></div></div>
+  <div id="toast-root"></div>
+  <script src="./bootstrap.js"></script>
+  <script src="./compat.js"></script>
+  <script src="./bridge.js"></script>
+  <script src="./vendor/hls.min.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

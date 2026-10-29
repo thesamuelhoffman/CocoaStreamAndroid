@@ -1,0 +1,1 @@
+{"name":"cocoastream-android-checks","private":true,"type":"module","scripts":{"test":"bash scripts/test.sh"},"devDependencies":{"acorn":"8.16.0"}}

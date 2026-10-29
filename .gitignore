@@ -1,0 +1,16 @@
+.gradle/
+node_modules/
+**/build/
+local.properties
+keystore.properties
+*.jks
+*.keystore
+*.p12
+*.idsig
+CocoaStream.apk
+*.log
+npm-debug.log*
+screenshots/
+__pycache__/
+.idea/
+.DS_Store

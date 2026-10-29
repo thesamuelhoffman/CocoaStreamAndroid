@@ -1,0 +1,254 @@
+/* Floating playback controls -- rendered in a separate transparent window
+   stacked above the native video surface so the video itself never resizes
+   when controls fade in or out.
+
+   IMPORTANT (regression found 2026-09): every visible element here used to
+   route through `backdrop-filter: blur(...)` for its "glass" look. On a
+   `transparent:true` Electron BrowserWindow on Windows, backdrop-filter has
+   to sample whatever is composited BEHIND the window by the OS -- which a
+   transparent/layered window cannot actually hand Chromium correctly, and
+   the fallback rendering came out washed-out/low-contrast across the WHOLE
+   window, not just the blurred elements (confirmed with a plain, no-filter,
+   fully-opaque solid-color canary element that was ALSO dim). backdrop-filter
+   is gone from every rule below; the "glass" look now comes entirely from
+   solid, deliberately high-alpha backgrounds, which render correctly on a
+   transparent layered window. See controls-overlay.mjs's explicit
+   setOpacity(1) for the other half of this fix. */
+
+html, body { background: transparent !important; width: 100%; height: 100%; overflow: hidden; cursor: none; }
+body.ov-controls-visible { cursor: default; }
+
+/* Windows hit-tests a layered/transparent window by alpha: a fully
+   transparent (alpha 0) pixel lets the click fall straight through to
+   whatever real window is underneath -- here, the native mpv surface,
+   which can't handle input and makes the OS play an error sound. A
+   background alpha of 1/255 is visually identical to "none" but keeps
+   every click on this layer. */
+.ov-hit { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.004); }
+
+/* Icon sprite host. Kept in the render tree (NOT display:none, which can stop
+   <use> resolving in some engines) but sized to zero so it never paints. */
+.ov-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+.ov-big-pulse {
+  position: fixed; top: 50%; left: 50%; width: 92px; height: 92px; margin: -46px 0 0 -46px;
+  border-radius: 50%; background: rgba(6, 12, 9, .82);
+  display: grid; place-items: center; opacity: 0; pointer-events: none;
+  transform: scale(.82); box-shadow: 0 8px 32px rgba(0,0,0,.5);
+}
+.ov-big-pulse svg { width: 36px; height: 36px; color: #fff; }
+.ov-big-pulse.pulse { animation: ovBigPulse .5s ease; }
+@keyframes ovBigPulse {
+  0% { opacity: 0; transform: scale(.7); }
+  35% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.08); }
+}
+
+/* Only these chrome GROUPS fade for auto-hide -- never the window/root
+   (html/body above are always at full, unconditional opacity). */
+.ov-bar {
+  /* gap 0.25rem = 3.75px at the reference player's 15px root (ControlBar styles.less). */
+  position: fixed; left: 0; right: 0; display: flex; align-items: center; gap: 4px;
+  opacity: 0; pointer-events: none;
+  transition: opacity .18s ease-out;
+}
+body.ov-controls-visible .ov-bar { opacity: 1; pointer-events: auto; }
+
+.ov-top {
+  top: 0; padding: 24px 28px 60px;
+  background: linear-gradient(rgba(0, 0, 0, .82) 0%, rgba(0, 0, 0, .5) 55%, transparent 100%);
+}
+.ov-titles { min-width: 0; }
+.ov-title { font-weight: 800; font-size: 1.05rem; color: #fff; text-shadow: 0 2px 12px rgba(0,0,0,.8); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46vw; }
+.ov-subtitle { color: #d8e0da; font-family: inherit; font-size: .8rem; margin-top: 4px; text-shadow: 0 2px 10px rgba(0,0,0,.8); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46vw; }
+
+.ov-bottom {
+  /* Content flush against the literal bottom pixel of a transparent,
+     frameless window does not composite reliably on Windows (DWM appears to
+     reserve/clip an edge region even with resizable:false) -- a few pixels
+     of breathing room avoids it without being visually noticeable. */
+  bottom: 6px; padding: 0 28px 20px; flex-direction: column; align-items: stretch; gap: 10px;
+}
+.ov-bottom::before {
+  content: ''; position: absolute; inset: -120px 0 -6px 0; z-index: -1;
+  background: linear-gradient(transparent, rgba(0, 0, 0, .55) 60px, rgba(0, 0, 0, .88) 120px, rgba(0, 0, 0, .88));
+}
+
+.ov-timeline-row { padding: 0 2px 2px; }
+.ov-timeline {
+  /* the reference player SeekBar: --track-size 0.4rem (6px), --thumb-size 1.2rem (18px).
+     Sam: "the seek-thumb is visibly off-center". Measured from painted pixels
+     (harness A7 probe), the thumb sat 3.4 CSS px high, identically windowed and
+     fullscreen -- a constant offset, not a DPI artifact. Root cause: with a
+     6px-tall input box, WebKit positions the 18px UA thumb relative to the box
+     and any margin-top we add fights the engine's own centering, which is why
+     the textbook -(18-6)/2 = -6px was wrong and a tuned margin only got to
+     -1.8px. So don't fight it: make the input box exactly the thumb size (the
+     UA then has zero slack to misalign) and paint the 6px track as a centered
+     background band instead. Deterministic at any size/DPI, no magic number. */
+  -webkit-appearance: none; appearance: none; width: 100%;
+  height: 18px;
+  background: linear-gradient(90deg, var(--green-3) 0%, var(--green-3) var(--progress, 0%), rgba(255,255,255,.28) var(--progress, 0%), rgba(255,255,255,.28) 100%);
+  background-size: 100% 6px;
+  background-position: center;
+  background-repeat: no-repeat;
+  border-radius: 0;
+  cursor: pointer; outline: none;
+}
+.ov-timeline:focus-visible { outline: 2px solid #fff; outline-offset: 4px; }
+.ov-timeline::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 0 4px rgba(102,162,118,.4), 0 2px 6px rgba(0,0,0,.5);
+  margin-top: 0; transition: transform .15s ease;
+}
+.ov-timeline:hover::-webkit-slider-thumb, .ov-timeline:active::-webkit-slider-thumb { transform: scale(1.2); }
+
+.ov-row { display: flex; align-items: center; gap: 10px; }
+
+/* Both bars rely on an .ov-spacer element to push their trailing controls
+   (top: cast/sources -- bottom: captions/speed/next/fullscreen) to the right
+   edge, exactly like the reference player's own ControlBar uses its `spacing` div
+   (flex: 1) for. This rule was missing, so every control packed against the
+   left and the right half of both bars rendered empty (regression found
+   2026-09). .spacer in styles.css is the main app's, not this window's. */
+.ov-spacer { flex: 1 1 auto; min-width: 0; }
+
+/* Geometry mirrors the reference player's ControlBar
+   (src/routes/Player/ControlBar/styles.less): button 4rem, radius 0.75rem,
+   icon 2.2rem, hover background 150ms, disabled icon opacity 0.4. At the reference player's
+   15px root that is a 60px box / 11px radius / 33px icon; we keep CocoaStream's
+   brand colors but match the upstream metrics. */
+.ov-icon-btn {
+  width: 60px; height: 60px; min-width: 60px; border-radius: 11px; border: 0;
+  background: transparent; color: #fff;
+  display: grid; place-items: center; cursor: pointer; position: relative;
+  transition: background-color .15s ease;
+}
+.ov-icon-btn:hover { background: rgba(255, 255, 255, .18); }
+.ov-icon-btn:active { background: rgba(255, 255, 255, .28); }
+.ov-icon-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.ov-icon-btn svg { width: 33px; height: 33px; transition: transform .1s ease; }
+.ov-icon-btn:disabled, .ov-icon-btn.disabled { cursor: default; }
+.ov-icon-btn:disabled svg, .ov-icon-btn.disabled svg { opacity: .4; }
+.ov-icon-btn:disabled:hover, .ov-icon-btn.disabled:hover { background: transparent; }
+.ov-icon-btn-lg { width: 60px; height: 60px; min-width: 60px; border-radius: 11px; background: #fff; color: #0b120d; }
+.ov-icon-btn-lg:hover { background: #e7ede9; }
+.ov-icon-btn-lg svg { width: 33px; height: 33px; }
+
+.ov-pill {
+  height: 60px; padding: 0 18px; border-radius: 11px; border: 1px solid rgba(255,255,255,.22);
+  background: rgba(255, 255, 255, .12); color: #fff;
+  cursor: pointer; font-size: .8rem; font-weight: 700; white-space: nowrap;
+  transition: background-color .15s ease;
+}
+.ov-pill:hover { background: rgba(255, 255, 255, .24); }
+.ov-pill:active { background: rgba(255, 255, 255, .32); }
+.ov-pill:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.ov-speed-btn {
+  /* Sam: "the speed pill is oversized". Upstream's speed control is a plain
+     transparent 4rem (60px) icon button -- there is no bordered pill in
+     the reference player's ControlBar at all. Keep the readout, match the other buttons. */
+  width: 60px; min-width: 60px; padding: 0; border: 0; background: transparent;
+  font-size: .72rem; letter-spacing: -.02em;
+}
+.ov-speed-btn:hover { background: rgba(255, 255, 255, .18); }
+.ov-speed-btn:active { background: rgba(255, 255, 255, .28); }
+
+/* Seek bumpers: the licensed directional triangles stay, and the amount is
+   real text because the glyphs alone never stated it (Sam) and upstream ships
+   no skip-10 icon to borrow. Sized down from the shared 33px so glyph+numeral
+   fit inside the 60px button. */
+.ov-seek-btn { display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 3px; }
+.ov-seek-btn .ov-seek-ico { width: 17px; height: 17px; }
+.ov-seek-btn .ov-seek-num { font-size: .72rem; font-weight: 700; line-height: 1; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+
+.ov-volume-group { display: flex; align-items: center; gap: 10px; }
+.ov-volume {
+  /* the reference player volume-slider: track 0.35rem (5.25px), thumb 1rem (15px),
+     flex-basis 10rem (150px). */
+  -webkit-appearance: none; appearance: none; width: 0; height: 5px; border-radius: 999px;
+  background: rgba(255,255,255,.28); accent-color: #fff; cursor: pointer;
+  overflow: hidden; transition: width .18s ease, opacity .18s ease; opacity: 0;
+}
+.ov-volume::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 15px; height: 15px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,.5);
+}
+.ov-volume-group:hover .ov-volume, .ov-volume-group.expanded .ov-volume { width: 150px; opacity: 1; }
+
+/* the reference player SeekBar .label: width 5.5rem (82.5px), font 1.1rem (16.5px),
+   tabular-nums, opacity 0.9. */
+.ov-time { color: #fff; font-family: inherit; font-size: 1.1rem; font-weight: 600; font-variant-numeric: tabular-nums; min-width: 82px; opacity: .9; text-shadow: 0 2px 8px rgba(0,0,0,.7); }
+
+.ov-menu-wrap { position: relative; }
+.ov-menu {
+  /* the reference player menus (SubtitlesMenu/AudioMenu): container width 16rem (240px),
+     max-height 25rem (375px), list padding 0 1rem, option gap 0.5rem. */
+  position: absolute; right: 0; min-width: 240px; max-width: 320px; max-height: 375px; overflow: auto;
+  background: rgba(10, 16, 12, .97);
+  border: 1px solid rgba(255,255,255,.12); border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.6);
+  padding: 8px; display: grid; gap: 4px;
+}
+.ov-menu-up { bottom: calc(100% + 14px); }
+/* The cast picker hangs off the TOP bar, so its menu opens downward. */
+.ov-menu-down { top: calc(100% + 14px); bottom: auto; }
+/* Cast discovery/result line. The cast flow reports its outcome HERE rather
+   than via the main window's toast: during native playback mpv paints into a
+   raw child window above Chromium's compositor, so a toast in the main
+   window is invisible -- exactly why the old picker looked like a no-op. */
+.ov-menu-status { padding: 8px 11px; color: #a9b6ae; font-size: .8rem; line-height: 1.4; }
+.ov-menu-status-error { color: #ffb4a2; }
+.ov-menu-sub { color: #a9b6ae; font-size: .72rem; }
+.ov-menu-option {
+  /* the reference player option: height 4rem (60px), padding 0 1.5rem (22.5px),
+     radius var(--border-radius); hover/selected share one background. */
+  display: flex; align-items: center; gap: 10px; text-align: left; border: 0; background: transparent;
+  color: #e9efea; min-height: 44px; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: .9rem;
+}
+.ov-menu-option:hover, .ov-menu-option:focus-visible { background: rgba(255, 255, 255, .1); outline: none; }
+.ov-menu-option:focus-visible { box-shadow: inset 0 0 0 2px rgba(255,255,255,.6); }
+.ov-menu-option.active { color: var(--green-3); font-weight: 700; }
+.ov-menu-check { width: 16px; height: 16px; flex: 0 0 auto; color: var(--green-3); display: grid; place-items: center; }
+.ov-menu-check svg { width: 16px; height: 16px; }
+/* Options-menu rows lead with their action's icon rather than a checkmark,
+   so that slot takes the row's own text colour (green there would read as
+   "selected" when nothing is selected). */
+.ov-menu-option-icon .ov-menu-check { color: inherit; }
+.ov-menu-title { padding: 6px 11px 4px; color: #a9b6ae; font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; }
+/* Subtitle settings steppers (Size / Delay). the reference player's SubtitlesMenu shows
+   these as a labelled row with -/+ controls; keep the same shape so the
+   settings panel reads as part of the same menu, not a bolted-on widget. */
+.ov-menu-stepper {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 6px 11px; border-radius: 8px;
+}
+.ov-menu-stepper-label { color: #e9efea; font-size: .84rem; }
+.ov-menu-stepper-ctl { display: flex; align-items: center; gap: 4px; }
+.ov-step-btn {
+  width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center;
+  border: 1px solid rgba(255,255,255,.16); border-radius: 8px;
+  background: rgba(255,255,255,.06); color: #e9efea;
+  font-family: inherit; font-size: 1rem; line-height: 1; cursor: pointer;
+}
+.ov-step-btn:hover, .ov-step-btn:focus-visible { background: rgba(255,255,255,.14); outline: none; }
+.ov-step-btn:focus-visible { box-shadow: inset 0 0 0 2px rgba(255,255,255,.6); }
+.ov-menu-stepper-value {
+  min-width: 52px; text-align: center; color: #e9efea;
+  font-size: .84rem; font-variant-numeric: tabular-nums;
+}
+
+.ov-menu-wide { min-width: 270px; max-width: 330px; }
+.ov-episode-option { align-items: flex-start; padding: 9px 11px; }
+.ov-episode-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ov-episode-num { font-weight: 700; font-size: .78rem; letter-spacing: .02em; }
+.ov-episode-title { color: #a9b6ae; font-size: .78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 250px; }
+.ov-episode-option.active .ov-episode-title { color: var(--green-3); opacity: .9; }
+
+/* Subtitles menu: one collapsed line, then a searchable, language-grouped
+   list that scrolls inside the menu instead of growing it. */
+.ov-subs-head { font-weight: 700; }
+.ov-subs-search { padding: 4px 16px; color: #a9b6ae; font-size: .78rem; }
+.ov-subs-search b { color: #e9efea; }
+.ov-subs-list { display: grid; gap: 2px; max-height: 210px; overflow: auto; }
+.ov-subs-lang { padding: 6px 16px 2px; text-transform: uppercase; letter-spacing: .04em; }
+.ov-subs-lang span { opacity: .6; }
