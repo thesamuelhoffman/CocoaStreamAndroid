@@ -9,6 +9,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -92,14 +93,16 @@ class Bridge(private val activity: MainActivity, private val webView: WebView) :
             "addon:manifest" -> addons.manifest(args.optString(0))
             "addon:request" -> addons.request(args.optJSONObject(0) ?: JSONObject())
 
-            "app:version" -> "1.2.1 (Android)"
+            "app:version" -> "1.2.2 (Android)"
             "app:open-external" -> openExternal(args.optString(0))
             "app:write-clipboard" -> writeClipboard(args.optString(0))
             "app:clear-cache" -> clearCache()
             "app:check-updates" -> throw IllegalStateException("Install a newer CocoaStream APK to update. No update server is configured.")
 
             "playback:native-start" -> nativeStart(args.optJSONObject(0) ?: JSONObject())
-            "playback:native-prewarm" -> JSONObject().put("enabled",false).put("reason","Background prefetching is disabled.")
+            "playback:native-prewarm" -> TorrentPrewarm.prepare(File(activity.cacheDir,"cocoa"),args.optJSONObject(0) ?: JSONObject())
+            "playback:native-replace" -> PlayerActivity.current?.replaceSource(args.optJSONObject(0) ?: JSONObject())
+                ?: JSONObject().put("ok",false)
             "playback:native-stop" -> stopPlayback(args.optString(0))
             "playback:native-stats" -> PlayerActivity.current?.statsSnapshot() ?: JSONObject()
             "playback:torrent-stats" -> PlayerActivity.current?.torrentStats() ?: JSONObject()

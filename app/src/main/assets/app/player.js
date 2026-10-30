@@ -43,7 +43,8 @@ function randomOf(list) { return list[Math.floor(Math.random() * list.length)]; 
 // a rejection, never to "still pending". A bound turns "never finishes"
 // into a normal rejection the retry path already handles.
 //
-// One total native-start budget; no background warming or phase-dependent reset.
+// One total budget per chosen source; the next series episode is warmed only
+// by the near-end hook and does not extend a failed source's startup budget.
 const PER_SOURCE_LOAD_TIMEOUT_MS = 30000;
 
 export class CocoaPlayer {
@@ -207,28 +208,34 @@ export class CocoaPlayer {
     if (stream.infoHash || stream.url) {
       this.setLoading(randomOf(HUNTING_LINES));
       this.nativeRequested = true;
-      return window.cocoa.playback.nativeStart({
-        ownerId: this.ownerId,
-        stream,
-        title: this.nativeTitle(),
-        resumePosition: Number(this.options.resumePosition || 0),
-        resumeDuration: Number(this.options.resumeDuration || 0),
-        preferences: this.options.preferences || {},
-        // For the /create guessFileIdx hint when the add-on didn't supply an
-        // explicit fileIdx -- see torrent-engine.mjs's createOptionsForStream,
-        // mirroring the reference player/the reference player-video's own createTorrent.js.
-        season: this.options.video?.season ?? this.options.video?.seasonNumber ?? null,
-        episode: this.options.video?.episode ?? this.options.video?.episodeNumber ?? null,
-        // The per-source budget the MAIN process enforces. Passing it (rather
-        // than only timing out here) is what makes the failure diagnosable:
-        // native-player's waitForLoad reports a measured reason -- dead swarm
-        // with real cache/throughput numbers, or mpv's own exit code -- where
-        // a renderer-side timer could only ever say "took too long".
-        loadTimeoutMs: PER_SOURCE_LOAD_TIMEOUT_MS,
-        prefetchStreams: []
-      });
+      return window.cocoa.playback.nativeStart(this.nativePayload(stream));
     }
     throw new Error('This add-on returned a source type CocoaStream does not support yet.');
+  }
+
+  nativePayload(stream,resumePosition=Number(this.options.resumePosition||0)) {
+    return {
+      ownerId:this.ownerId,
+      stream,
+      title:this.nativeTitle(),
+      resumePosition,
+      resumeDuration:Number(this.options.resumeDuration||0),
+      preferences:this.options.preferences||{},
+      season:this.options.video?.season??this.options.video?.seasonNumber??null,
+      episode:this.options.video?.episode??this.options.video?.episodeNumber??null,
+      loadTimeoutMs:PER_SOURCE_LOAD_TIMEOUT_MS,
+      prefetchStreams:[]
+    };
+  }
+
+  async replaceNativeSource(stream) {
+    if(this.destroyed||!this.nativeMode)return false;
+    const position=Number(this.nativeStats?.position??this.options.resumePosition??0);
+    const result=await window.cocoa.playback.nativeReplace(this.nativePayload(stream,position));
+    if(!result?.ok)throw new Error('The player could not switch to that source.');
+    this.options.stream=stream;
+    this.castUrl=stream.url||'';
+    return true;
   }
 
   // Unreachable with today's add-on stream shapes (see note above), kept as
@@ -322,7 +329,7 @@ export class CocoaPlayer {
     if (this.destroyed) return;
     const { action } = payload;
     if (action === 'close') this.close();
-    else if (action === 'source') { this.saveProgress(true).then(() => { this.options.onChangeSource?.(); this.close(false); }); }
+    else if (action === 'source' || action === 'request-sources') this.requestSources();
     else if (action === 'next') { this.saveProgress(true).then(() => { this.options.onNext?.(); this.close(false); }); }
     else if (action === 'select-episode') { this.saveProgress(true).then(() => { this.options.onSelectEpisode?.(payload.videoId); this.close(false); }); }
     else if (action === 'subtitle-search') this.subtitleSearchOpen = Boolean(payload.open);
@@ -333,7 +340,6 @@ export class CocoaPlayer {
     else if (action === 'open-stream') this.openStreamLink();
     else if (action === 'download-subs') this.openSubtitleLink();
     else if (action === 'cast-started') this.onCastStarted(payload.deviceId);
-    else if (action === 'request-sources') this.requestSources();
     else if (action === 'select-source') this.selectSourceByIndex(Number(payload.index));
   }
 
@@ -763,15 +769,15 @@ export class CocoaPlayer {
     try {
       const payload = await this.options.onRequestSources();
       if (this.destroyed) return;
-      this.overlaySourcesSync(payload?.sources || [], payload?.sourceIndex ?? -1);
+      this.overlaySourcesSync(payload?.sources || [], payload?.sourceIndex ?? -1,payload?.sourcesError||'');
     } catch (error) {
       if (this.destroyed) return;
       window.cocoa.overlay.sync({ sources: [], sourcesError: error?.message || 'Could not load sources.' }).catch(() => {});
     }
   }
 
-  overlaySourcesSync(sources, sourceIndex) {
-    window.cocoa.overlay.sync({ sources, sourceIndex }).catch(() => {});
+  overlaySourcesSync(sources, sourceIndex, sourcesError='') {
+    window.cocoa.overlay.sync({ sources, sourceIndex, sourcesError }).catch(() => {});
   }
 
   selectSourceByIndex(index) {

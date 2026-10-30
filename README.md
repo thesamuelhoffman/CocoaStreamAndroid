@@ -20,7 +20,7 @@ git remote add origin https://github.com/YOUR-NAME/YOUR-REPOSITORY.git
 git push -u origin main
 ```
 
-Then create and publish release tag `v1.2.1` in GitHub's **Releases** page. The workflow builds and attaches `CocoaStream.apk`.
+Then create and publish release tag `v1.2.3` in GitHub's **Releases** page. The workflow builds and attaches `CocoaStream.apk`.
 
 ### Keep app updates installable
 

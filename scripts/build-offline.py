@@ -52,7 +52,7 @@ manifest=(root/'app/src/main/AndroidManifest.xml').read_text().replace('<manifes
 manifest=manifest.replace('<application','<uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34"/><application',1)
 (out/'AndroidManifest.xml').write_text(manifest)
 resource_apk=out/'resources.apk'
-run(bt/'aapt2','link','-o',resource_apk,'--manifest',out/'AndroidManifest.xml','-I',android,'--auto-add-overlay','--java',java,'--extra-packages',':'.join(packages),'--version-code','7','--version-name','1.2.1',*res,'-R',compiled)
+run(bt/'aapt2','link','-o',resource_apk,'--manifest',out/'AndroidManifest.xml','-I',android,'--auto-add-overlay','--java',java,'--extra-packages',':'.join(packages),'--version-code','8','--version-name','1.2.3',*res,'-R',compiled)
 classes=out/'classes'
 if classes.exists():shutil.rmtree(classes)
 classes.mkdir()

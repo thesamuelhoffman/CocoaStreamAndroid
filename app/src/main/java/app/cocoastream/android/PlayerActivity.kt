@@ -1,6 +1,8 @@
 package app.cocoastream.android
 
 import android.app.Activity
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
@@ -13,6 +15,8 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -54,6 +58,13 @@ class PlayerActivity : Activity() {
     private var playerView: PlayerView? = null
     private var statusText: TextView? = null
     private var episodeButton: android.view.View? = null
+    private var seekBar: SeekBar? = null
+    private var timeLabel: TextView? = null
+    private var playButton: TextView? = null
+    private var sourcePickerPending = false
+    private var sourceLoadingDialog: android.app.AlertDialog? = null
+    private var scrubbing = false
+    private var loadGeneration = 0
     private var engine: TorrentEngine? = null
     private var castStream: CastStream? = null
     private var controlsState = JSONObject()
@@ -98,8 +109,7 @@ class PlayerActivity : Activity() {
         val root = FrameLayout(this)
         root.setBackgroundColor(Color.BLACK)
         val pv = PlayerView(this).apply {
-            useController = true
-            controllerShowTimeoutMs=0
+            useController = false
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
             setBackgroundColor(Color.BLACK)
             layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -133,16 +143,64 @@ class PlayerActivity : Activity() {
             })
         }
         button("‹  Back"){finishPlayback(false)}
-        button("Sources"){action("source")}
+        button("Sources"){showSources()}
         button("Episodes"){showEpisodes()}
         episodeButton=top.getChildAt(top.childCount-1)
         episodeButton?.visibility=android.view.View.GONE
         button("Playback"){showMore()}
         SubtitleFont.peek(this)?.let { face -> for(i in 0 until top.childCount) (top.getChildAt(i) as? TextView)?.typeface=face }
         root.addView(top)
-        pv.setShowSubtitleButton(true)
-        pv.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility -> top.visibility=visibility })
+        val bottom = LinearLayout(this).apply {
+            orientation=LinearLayout.VERTICAL
+            setPadding(dp(16),dp(12),dp(16),dp(14))
+            background=android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(Color.TRANSPARENT,Color.argb(225,0,0,0))
+            )
+            layoutParams=FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT,Gravity.BOTTOM)
+        }
+        val seekRow=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
+        val time=TextView(this).apply { text="0:00 / --:--";setTextColor(Color.WHITE);textSize=12f;setPadding(0,0,dp(10),0) }
+        val seek=SeekBar(this).apply {
+            max=1000
+            isEnabled=false
+            progressTintList=android.content.res.ColorStateList.valueOf(Color.rgb(100,190,118))
+            thumbTintList=android.content.res.ColorStateList.valueOf(Color.WHITE)
+            layoutParams=LinearLayout.LayoutParams(0,dp(38),1f)
+            setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar:SeekBar,value:Int,fromUser:Boolean) {
+                    if(fromUser) updateTimeLabel(player?.currentPosition ?: 0L,player?.duration ?: 0L,value)
+                }
+                override fun onStartTrackingTouch(bar:SeekBar) { scrubbing=true }
+                override fun onStopTrackingTouch(bar:SeekBar) {
+                    scrubbing=false
+                    val duration=player?.duration ?: 0L
+                    if(duration>0) player?.seekTo((duration*bar.progress/1000L).coerceIn(0L,duration))
+                }
+            })
+        }
+        timeLabel=time;seekBar=seek
+        seekRow.addView(time);seekRow.addView(seek)
+        bottom.addView(seekRow)
+        val actions=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER;setPadding(0,dp(4),0,0) }
+        fun control(label:String, description:String=label, click:()->Unit):TextView {
+            val view=TextView(this).apply {
+                text=label;contentDescription=description;setTextColor(Color.WHITE);textSize=16f;gravity=Gravity.CENTER
+                setPadding(dp(14),0,dp(14),0);minWidth=dp(54);minHeight=dp(44)
+                background=android.graphics.drawable.GradientDrawable().apply {setColor(Color.argb(135,20,27,22));cornerRadius=dp(14).toFloat()}
+                layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,dp(44)).apply {marginStart=dp(5);marginEnd=dp(5)}
+                setOnClickListener{click()}
+            }
+            actions.addView(view);return view
+        }
+        control("−10","Back 10 seconds"){seekBy(-10_000)}
+        playButton=control("▶","Play"){if(player?.isPlaying==true)player?.pause() else player?.play()}
+        control("+10","Forward 10 seconds"){seekBy(10_000)}
+        control("↻","Rotate screen"){rotateScreen()}
+        bottom.addView(actions)
+        root.addView(bottom)
         setContentView(root)
+        applyImmersiveFullscreen()
         playerView = pv
         statusText = status
         applySubtitleStyle(pv)
@@ -170,8 +228,10 @@ class PlayerActivity : Activity() {
                 Log.i(TAG, "first-frame ownerId=$ownerId ms=$ms")
                 statusText?.visibility = TextView.GONE
                 PlaybackBus.listener?.onReady(ownerId, ms)
-                playerView?.controllerShowTimeoutMs=5000
+                updatePlaybackControls(exo)
             }
+
+            override fun onIsPlayingChanged(isPlaying:Boolean) { updatePlaybackControls(exo) }
 
             override fun onPlayerError(error: PlaybackException) {
                 Log.w(TAG, "player error: ${error.errorCodeName} ${error.message}")
@@ -179,7 +239,7 @@ class PlayerActivity : Activity() {
             }
         })
         main.post(statsTicker)
-        main.postDelayed({if(!finished && !firstFrame)fail("This source did not deliver a picture within 35 seconds. Try another source.")},35000)
+        scheduleLoadTimeout()
         open()
     }
 
@@ -236,9 +296,13 @@ class PlayerActivity : Activity() {
         PlaybackBus.listener?.onStage(ownerId, "metadata")
         io.execute {
             try {
-                val eng = TorrentEngine(File(cacheDir, "cocoa"))
+                val root=File(cacheDir,"cocoa")
+                val season=payload.optInt("season",-1)
+                val episode=payload.optInt("episode",-1)
+                val warmed=TorrentPrewarm.take(root,infoHash,fileIdx,season,episode)
+                val eng=warmed ?: TorrentEngine(root)
                 engine = eng
-                eng.start(eng.magnetFor(infoHash, stream), fileIdx, season=payload.optInt("season",-1), episode=payload.optInt("episode",-1))
+                if(warmed==null)eng.start(eng.magnetFor(infoHash,stream),fileIdx,season=season,episode=episode)
                 Log.i(TAG, "torrent ready metadataMs=${eng.metadataMs} size=${eng.fileSize}")
                 PlaybackBus.listener?.onStage(ownerId,"ready")
                 runOnUiThread {
@@ -292,12 +356,103 @@ class PlayerActivity : Activity() {
         exo.playWhenReady = true
     }
 
+    private fun scheduleLoadTimeout() {
+        val attempt=++loadGeneration
+        main.postDelayed({
+            if(attempt==loadGeneration && !finished && !firstFrame) fail("This source did not deliver a picture within 35 seconds. Try another source.")
+        },35000)
+    }
+
+    private fun updatePlaybackControls(exo:ExoPlayer) {
+        val duration=exo.duration
+        val position=exo.currentPosition.coerceAtLeast(0L)
+        val bar=seekBar
+        val hasTimeline=duration>0L && duration!=C.TIME_UNSET
+        bar?.isEnabled=hasTimeline
+        if(hasTimeline && !scrubbing) bar?.progress=((position*1000L/duration).toInt()).coerceIn(0,1000)
+        updateTimeLabel(position,duration,if(scrubbing)bar?.progress else null)
+        playButton?.apply { text=if(exo.isPlaying)"Ⅱ" else "▶";contentDescription=if(exo.isPlaying)"Pause" else "Play" }
+    }
+
+    private fun updateTimeLabel(position:Long,duration:Long,progress:Int?) {
+        val total=duration.takeIf{it>0L && it!=C.TIME_UNSET}
+        val shown=if(progress!=null && total!=null) total*progress/1000L else position
+        timeLabel?.text="${formatTime(shown)} / ${total?.let(::formatTime) ?: "--:--"}"
+    }
+
+    private fun formatTime(ms:Long):String {
+        val total=(ms.coerceAtLeast(0L)/1000L)
+        val seconds=total%60
+        val minutes=total/60
+        return if(minutes>=60) String.format(java.util.Locale.ROOT,"%d:%02d:%02d",minutes/60,minutes%60,seconds)
+        else String.format(java.util.Locale.ROOT,"%d:%02d",minutes,seconds)
+    }
+
+    private fun seekBy(deltaMs:Long) {
+        val exo=player ?: return
+        val duration=exo.duration.takeIf{it>0L && it!=C.TIME_UNSET}
+        val target=(exo.currentPosition+deltaMs).coerceAtLeast(0L).let{if(duration!=null)it.coerceAtMost(duration)else it}
+        exo.seekTo(target)
+        updatePlaybackControls(exo)
+    }
+
+    private fun rotateScreen() {
+        requestedOrientation=if(resources.configuration.orientation==Configuration.ORIENTATION_LANDSCAPE)
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        applyImmersiveFullscreen()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyImmersiveFullscreen() {
+        window.decorView.systemUiVisibility=(android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+            or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            or android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            or android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+    }
+
+    override fun onWindowFocusChanged(hasFocus:Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if(hasFocus) applyImmersiveFullscreen()
+    }
+
+    private fun showSources() {
+        if(sourcePickerPending)return
+        sourcePickerPending=true
+        sourceLoadingDialog=android.app.AlertDialog.Builder(this)
+            .setTitle("Sources")
+            .setMessage("Finding available sources…")
+            .setNegativeButton("Cancel"){_,_->sourcePickerPending=false;sourceLoadingDialog=null}
+            .create().also { it.setOnCancelListener{sourcePickerPending=false;sourceLoadingDialog=null};it.show() }
+        action("request-sources")
+    }
+
+    private fun showSourceResults() {
+        if(!sourcePickerPending)return
+        sourcePickerPending=false
+        sourceLoadingDialog?.dismiss();sourceLoadingDialog=null
+        val sources=controlsState.optJSONArray("sources") ?: org.json.JSONArray()
+        val error=controlsState.optString("sourcesError")
+        if(sources.length()==0) {
+            showChoiceSheet("Sources",arrayOf(error.ifBlank{"No usable sources found."})){}
+            return
+        }
+        val labels=Array(sources.length()){i ->
+            val source=sources.optJSONObject(i)
+            val parts=listOfNotNull(source?.optString("label")?.takeIf{!it.isNullOrBlank()},source?.optString("quality")?.takeIf{!it.isNullOrBlank()},source?.optString("size")?.takeIf{!it.isNullOrBlank()})
+            (if(i==controlsState.optInt("sourceIndex",-1))"✓  " else "")+(parts.joinToString("  ·  ").ifBlank{"Source ${i+1}"})
+        }
+        showChoiceSheet("Choose a source",labels){index->action("select-source","index",index.toString())}
+    }
+
     private val statsTicker = object : Runnable {
         override fun run() {
             val exo = player
             if (exo != null && !finished) {
                 latestStats = buildStats(exo)
                 PlaybackBus.listener?.onStats(ownerId, latestStats)
+                updatePlaybackControls(exo)
             }
             main.postDelayed(this, 500)
         }
@@ -448,6 +603,29 @@ class PlayerActivity : Activity() {
         return JSONObject().put("ok", true)
     }
 
+    fun replaceSource(next:JSONObject):JSONObject {
+        if(next.optString("ownerId")!=ownerId || finished)return JSONObject().put("ok",false)
+        runOnUiThread {
+            if(finished)return@runOnUiThread
+            val oldEngine=engine
+            engine=null
+            player?.stop()
+            player?.clearMediaItems()
+            currentUri=null
+            subs.clear();subtitleUrls.clear()
+            payload=next
+            firstFrame=false
+            startedAt=System.currentTimeMillis()
+            latestStats=JSONObject()
+            statusText?.text="Opening source…"
+            statusText?.visibility=android.view.View.VISIBLE
+            oldEngine?.let{old->Thread({old.purge()},"cocoa-source-purge").start()}
+            scheduleLoadTimeout()
+            open()
+        }
+        return JSONObject().put("ok",true)
+    }
+
     fun fail(message: String) {
         if (finished) return
         finished = true
@@ -466,6 +644,7 @@ class PlayerActivity : Activity() {
             if(update.has("ownerId") && update.optString("ownerId")!=ownerId)return@runOnUiThread
             update.keys().forEach {controlsState.put(it,update.opt(it))}
             episodeButton?.visibility=if((controlsState.optJSONArray("episodes")?.length() ?: 0)>0)android.view.View.VISIBLE else android.view.View.GONE
+            if(update.has("sources") || update.has("sourcesError"))showSourceResults()
         }
     }
     private fun action(name:String, key:String?=null, value:String?=null) {

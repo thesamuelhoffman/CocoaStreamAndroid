@@ -861,6 +861,7 @@ async function fetchRankedStreams(item, video, { fresh = false } = {}) {
 // chooseSource() last produced. The in-player popover reads this.
 let activeSourceList = [];
 let activeSourceIndex = -1;
+let activeSourceKey = '';
 
 // Compact rows for the overlay popover. Deliberately small: the overlay
 // renders them in a 240-330px menu, and it must never re-implement ranking.
@@ -889,9 +890,26 @@ function activeSourceIndexOf(stream) {
 // "Sources" tore the player down and navigated home (Sam's real-app report).
 async function switchPlayerSource(item, video, stream, index = -1) {
   if (!stream) return;
-  await state.player?.saveProgress?.(true).catch?.(() => {});
-  toast(`Switching source: ${brandSafeText(sourceLabel(stream))}`);
+  const current=state.player;
+  await current?.saveProgress?.(true).catch?.(() => {});
   activeSourceIndex = index;
+  if(current?.nativeMode) {
+    current.options.onTryNextSource=fallbacksFor(activeSourceList,index<0?0:index).length
+      ? () => tryNextRankedSource(item,video,fallbacksFor(activeSourceList,index<0?0:index),current.options.failureHistory||[])
+      : null;
+    try {
+      await current.replaceNativeSource(stream);
+      toast(`Switching source: ${brandSafeText(sourceLabel(stream))}`);
+      const videoId=videoIdOf(video,item);
+      subtitlesFor(item,videoId,stream).then(subtitles=>{
+        if(state.player===current&&!current.destroyed)current.setSubtitles(subtitles);
+      }).catch(()=>{if(state.player===current&&!current.destroyed)current.setSubtitles([]);});
+    } catch(error) {
+      toast(error?.message||'Could not switch sources.','error');
+    }
+    return;
+  }
+  toast(`Switching source: ${brandSafeText(sourceLabel(stream))}`);
   const player = await launchPlayer(item, video, stream, null, fallbacksFor(activeSourceList, index < 0 ? 0 : index));
   const videoId = videoIdOf(video, item);
   subtitlesFor(item, videoId, stream).then(subtitles => {
@@ -912,6 +930,7 @@ async function chooseSource(item, video, { showPicker = false } = {}) {
     try {
       discovered = await fetchRankedStreams(item, video).finally(() => { finding.remove(); });
       activeSourceList = discovered.streams;
+      activeSourceKey = rankedCacheKey(item,video);
       if (discovered.streams.length) {
         activeSourceIndex = 0;
         return preparePlayback(item, video, discovered.streams[0], null, fallbacksFor(discovered.streams, 0));
@@ -939,6 +958,7 @@ async function chooseSource(item, video, { showPicker = false } = {}) {
     // Remember the ranked list so the in-player Sources popover can show the
     // SAME list without re-implementing discovery (see overlaySourceSummaries).
     activeSourceList = streams;
+    activeSourceKey = rankedCacheKey(item,video);
     if (!modal.isConnected) return;
     const body = $('.modal-body', modal);
     // The dead-stream check: a non-empty list is not the same as a playable
@@ -1060,10 +1080,11 @@ async function launchPlayer(item, video, stream, subtitles, fallbackStreams = []
     onRequestSources: async () => {
       // Reuse the list from chooseSource() when it's still current; only go
       // back to the add-ons when we have none (e.g. playback was resumed).
-      if (!activeSourceList.length) {
+      if (!activeSourceList.length || activeSourceKey!==rankedCacheKey(item,video)) {
         try {
           const { streams } = await fetchRankedStreams(item, video);
           activeSourceList = streams;
+          activeSourceKey = rankedCacheKey(item,video);
         } catch (error) {
           return { sources: [], sourceIndex: -1, sourcesError: error?.message || 'Could not load sources.' };
         }
@@ -1077,9 +1098,7 @@ async function launchPlayer(item, video, stream, subtitles, fallbackStreams = []
     },
     onTryNextSource: fallbackStreams.length ? () => tryNextRankedSource(item, video, fallbackStreams, failureHistory) : null,
     onNext: () => nextVideo && chooseSource(item, nextVideo),
-    // Sam (Oct 29): pre-load the next episode in the last five minutes, but
-    // only within the same season -- the last episode of a season or of the
-    // show warms nothing.
+    onNearEnd: () => nextVideo && prewarmNextEpisode(item,nextVideo,player),
     onSelectEpisode: videoId => {
       const target = allVideos.find(v => videoIdOf(v, item) === videoId);
       if (target) chooseSource(item, target);
@@ -1089,6 +1108,23 @@ async function launchPlayer(item, video, stream, subtitles, fallbackStreams = []
   state.player = player;
   await player.open();
   return player;
+}
+
+async function prewarmNextEpisode(item,video,player) {
+  if(!video||!player||state.player!==player||player.destroyed)return;
+  try {
+    const {streams}=await fetchRankedStreams(item,video);
+    if(state.player!==player||player.destroyed)return;
+    const stream=streams[0];
+    if(!stream?.infoHash)return;
+    await window.cocoa.playback.nativePrewarm({
+      stream,
+      season:video.season??video.seasonNumber??null,
+      episode:video.episode??video.episodeNumber??null
+    });
+  } catch(error) {
+    console.warn('Next episode warm-up failed:',error?.message||error);
+  }
 }
 
 

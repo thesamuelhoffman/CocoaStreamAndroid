@@ -47,6 +47,13 @@
     });
     return copy;
   }
+  function nativePlaybackPayload(payload) {
+    payload=payload||{};
+    return Object.assign({},payload,{
+      resumePosition:payload.preferences&&payload.preferences.resumePlayback===false?0:Math.round((payload.resumePosition||0)*1000),
+      resumeDuration:Math.round((payload.resumeDuration||0)*1000)
+    });
+  }
   window.__nativeEvent = function (name, detail) {
     if (name === 'native-stats' || name === 'native-closed') detail = playbackSeconds(detail);
     if (name === 'native-closed' && detail && detail.ended) dispatch('native-ended', detail);
@@ -81,10 +88,7 @@
     },
     playback: {
       nativeStart: function (payload) {
-        var nativePayload = Object.assign({}, payload, {
-          resumePosition: payload.preferences && payload.preferences.resumePlayback === false ? 0 : Math.round((payload.resumePosition || 0) * 1000),
-          resumeDuration: Math.round((payload.resumeDuration || 0) * 1000)
-        });
+        var nativePayload = nativePlaybackPayload(payload);
         return call('playback:native-start', nativePayload).then(function (result) {
           if (result && result.failure) {
             var error = new Error(result.failure.message || 'The source did not open.');
@@ -94,7 +98,8 @@
           return result;
         });
       },
-      nativePrewarm: function (payload) { return call('playback:native-prewarm', payload); },
+      nativeReplace: function (payload) { return call('playback:native-replace', nativePlaybackPayload(payload)); },
+      nativePrewarm: function (payload) { return call('playback:native-prewarm', nativePlaybackPayload(payload)); },
       nativeWarmReport: function () { return call('playback:warm-report'); },
       nativeOpensubHash: function () { return call('playback:opensub-hash'); },
       nativeStop: function (ownerId) { return call('playback:native-stop', ownerId); },
